@@ -82,7 +82,6 @@ bot.action('edit_age', (ctx) => { ctx.answerCbQuery(); ctx.session.step = 'editi
 bot.action('back_to_main', (ctx) => { ctx.answerCbQuery(); ctx.session.step = 'registered'; ctx.reply('Меню:', mainMenu); });
 
 // === ЛОГІКА ТРЕНУВАНЬ ===
-
 bot.action('start_workout', async (ctx) => {
     ctx.answerCbQuery();
     const telegramId = ctx.from.id;
@@ -128,7 +127,6 @@ bot.action(/view_split_(.+)/, async (ctx) => {
     const { data: exercises } = await supabase.from('workout_exercises').select('*').eq('split_id', splitId);
 
     let text = `🔥 **Тренування: ${split.name}**\n\n`;
-    
     if (!exercises || exercises.length === 0) {
         text += 'Тут ще немає вправ. Давай додамо!';
     } else {
@@ -153,55 +151,76 @@ bot.action(/add_ex_(.+)/, (ctx) => {
     ctx.reply('Напиши вправу у форматі: **Назва, Підходи, Повторення**\n\n*(Наприклад: Жим лежачи, 4, 10)*', { parse_mode: 'Markdown' });
 });
 
-// === НОВЕ: ПРОЦЕС ТРЕНУВАННЯ ===
-
 bot.action(/run_split_(.+)/, async (ctx) => {
     ctx.answerCbQuery();
     const splitId = ctx.match[1];
     ctx.session.activeSplitId = splitId;
     
     const { data: exercises } = await supabase.from('workout_exercises').select('*').eq('split_id', splitId);
-    
-    if (!exercises || exercises.length === 0) {
-        return ctx.reply('У цьому тренуванні немає вправ! Додай їх спочатку.');
-    }
+    if (!exercises || exercises.length === 0) return ctx.reply('У цьому тренуванні немає вправ! Додай їх спочатку.');
 
     const exButtons = exercises.map(ex => [Markup.button.callback(`📝 ${ex.name}`, `log_ex_${ex.id}`)]);
-    exButtons.push([Markup.button.callback('🏁 Завершити тренування', 'start_workout')]);
+    exButtons.push([Markup.button.callback('🔙 Назад', 'start_workout')]);
 
     ctx.reply('Тренування розпочато! Обирай вправу, яку зараз робиш:', Markup.inlineKeyboard(exButtons));
 });
 
+// === НОВА ЛОГІКА: ІНТЕРАКТИВНИЙ ЗАПИС ПІДХОДІВ ===
 bot.action(/log_ex_(.+)/, async (ctx) => {
     ctx.answerCbQuery();
     const exerciseId = ctx.match[1];
-    ctx.session.activeExerciseId = exerciseId;
-    ctx.session.step = 'logging_exercise';
+    const telegramId = ctx.from.id;
 
-    // Дістаємо назву вправи
+    // 1. Створюємо порожній запис для поточної вправи
+    const { data: newLog } = await supabase.from('exercise_logs').insert([{
+        telegram_id: telegramId,
+        exercise_id: exerciseId,
+        sets_data: [],
+        note: null
+    }]).select().single();
+
+    ctx.session.currentLogId = newLog.id;
+    ctx.session.step = 'logging_sets';
+
+    // 2. Дістаємо назву вправи та історію
     const { data: exercise } = await supabase.from('workout_exercises').select('*').eq('id', exerciseId).single();
     
-    // Шукаємо МИНУЛИЙ запис цієї вправи
+    // Шукаємо останнє виконання з непустими даними
     const { data: history } = await supabase.from('exercise_logs')
         .select('*')
         .eq('exercise_id', exerciseId)
+        .neq('id', newLog.id)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
 
-    let text = `Вправа: **${exercise.name}**\n\n`;
-    if (history) {
-        text += `📊 **Минулого разу:**\nВага: ${history.weight} кг | Підходів: ${history.sets_done} | Повторень: ${history.reps_done}\n`;
-        if (history.note) text += `💡 *Твій коментар:* ${history.note}\n\n`;
-    } else {
-        text += `Це твоє перше виконання цієї вправи.\n\n`;
+    let text = `💪 **Вправа: ${exercise.name}**\n\n`;
+    
+    if (history && history.sets_data && history.sets_data.length > 0) {
+        const hSets = history.sets_data;
+        const hAvg = (hSets.reduce((sum, set) => sum + set.weight, 0) / hSets.length).toFixed(1);
+        text += `📊 **Минулого разу:** Зроблено ${hSets.length} підх. | Сер. вага: ${hAvg} кг\n`;
+        if (history.note) text += `💡 *Твій коментар:* ${history.note}\n`;
+        text += `\n`;
     }
 
-    text += `👉 Напиши свій сьогоднішній результат у форматі:\n**Вага, Підходи, Повторення, Коментар**\n\n*(Наприклад: 80, 4, 10, Наступного разу взяти 82.5)*`;
+    text += `👉 Пиши результати кожного підходу сюди: **Вага, Повторення** *(наприклад: 80, 10)*.\n`;
+    text += `👉 Щоб додати чи змінити коментар, почни з: **Коментар:** *(наприклад: Коментар: було легко)*.`;
 
     ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
+bot.action('finish_exercise', async (ctx) => {
+    ctx.answerCbQuery();
+    ctx.session.step = 'registered';
+    
+    // Повертаємо меню поточного тренування
+    const { data: exercises } = await supabase.from('workout_exercises').select('*').eq('split_id', ctx.session.activeSplitId);
+    const exButtons = exercises.map(ex => [Markup.button.callback(`📝 ${ex.name}`, `log_ex_${ex.id}`)]);
+    exButtons.push([Markup.button.callback('🏁 Завершити тренування', 'start_workout')]);
+
+    ctx.reply('✅ Вправу успішно збережено! Обирай наступну:', Markup.inlineKeyboard(exButtons));
+});
 
 // === ОБРОБНИК ТЕКСТУ ===
 bot.on('text', async (ctx) => {
@@ -210,6 +229,7 @@ bot.on('text', async (ctx) => {
 
     try { await supabase.from('messages').insert([{ telegram_id: telegramId, message_text: text }]); } catch (e) {}
 
+    // ... (Ранні перевірки реєстрації залишаються без змін)
     if (ctx.session.step === 'waiting_for_weight' || ctx.session.step === 'editing_weight') {
         const weight = parseFloat(text);
         if (isNaN(weight)) return ctx.reply('Введи число.');
@@ -239,50 +259,48 @@ bot.on('text', async (ctx) => {
     if (ctx.session.step === 'waiting_for_exercise') {
         const parts = text.split(',');
         if (parts.length < 3) return ctx.reply('Формат: Назва, Підходи, Повторення (через кому).');
-        
         const exName = parts[0].trim();
         const exSets = parseInt(parts[1].trim()) || 3;
         const exReps = parts[2].trim();
-
-        await supabase.from('workout_exercises').insert([{ 
-            split_id: ctx.session.activeSplitId, 
-            name: exName, 
-            sets: exSets, 
-            reps_target: exReps 
-        }]);
-
-        // Безперервне додавання вправ (не міняємо session.step)
+        await supabase.from('workout_exercises').insert([{ split_id: ctx.session.activeSplitId, name: exName, sets: exSets, reps_target: exReps }]);
         return ctx.reply(`✅ Вправу "${exName}" додано! Пиши наступну, або тисни /menu, щоб вийти.`);
     }
 
-    // === НОВЕ: ЛОГУВАННЯ РЕЗУЛЬТАТІВ ТРЕНУВАННЯ ===
-    if (ctx.session.step === 'logging_exercise') {
+    // === ЛОГІКА ПІДХОДІВ (З АНАЛІТИКОЮ) ===
+    if (ctx.session.step === 'logging_sets') {
+        const logId = ctx.session.currentLogId;
+
+        // Перевіряємо, чи це коментар
+        if (text.toLowerCase().startsWith('коментар')) {
+            const noteText = text.substring(8).replace(/^[:\s]+/, '').trim(); // Забираємо слово "коментар"
+            const finalNote = noteText.length > 0 ? noteText : null; // Якщо порожньо - видаляємо
+            await supabase.from('exercise_logs').update({ note: finalNote }).eq('id', logId);
+            return ctx.reply(`✅ Коментар ${finalNote ? 'збережено' : 'видалено'}!\nЧекаю наступні підходи (Вага, Повторення).`, Markup.inlineKeyboard([[Markup.button.callback('🏁 Завершити вправу', `finish_exercise`)]]));
+        }
+
+        // Інакше парсимо як підхід
         const parts = text.split(',');
-        if (parts.length < 3) return ctx.reply('Формат: Вага, Підходи, Повторення, [Коментар]. Спробуй ще раз.');
+        if (parts.length < 2) return ctx.reply('Будь ласка, введи Вагу та Повторення через кому (наприклад: 80, 10). Або напиши "Коментар: свій текст".');
 
         const weight = parseFloat(parts[0].trim());
-        const sets = parseInt(parts[1].trim());
-        const reps = parts[2].trim();
-        // Якщо є коментар (4-та частина), з'єднуємо все, що після 3-ї коми (якщо всередині коментаря були коми)
-        const note = parts.length > 3 ? parts.slice(3).join(',').trim() : null;
+        const reps = parseInt(parts[1].trim());
 
-        await supabase.from('exercise_logs').insert([{
-            telegram_id: telegramId,
-            exercise_id: ctx.session.activeExerciseId,
-            weight: weight,
-            sets_done: sets,
-            reps_done: reps,
-            note: note
-        }]);
+        if (isNaN(weight) || isNaN(reps)) return ctx.reply('Вага і повторення мають бути числами!');
 
-        ctx.session.step = 'registered';
-        
-        // Повертаємо меню поточного тренування
-        const { data: exercises } = await supabase.from('workout_exercises').select('*').eq('split_id', ctx.session.activeSplitId);
-        const exButtons = exercises.map(ex => [Markup.button.callback(`📝 ${ex.name}`, `log_ex_${ex.id}`)]);
-        exButtons.push([Markup.button.callback('🏁 Завершити тренування', 'start_workout')]);
+        // Дістаємо поточні підходи з БД, додаємо новий і зберігаємо
+        const { data: currentLog } = await supabase.from('exercise_logs').select('sets_data').eq('id', logId).single();
+        const sets = currentLog.sets_data || [];
+        sets.push({ weight: weight, reps: reps });
+        await supabase.from('exercise_logs').update({ sets_data: sets }).eq('id', logId);
 
-        return ctx.reply('✅ Результат записано! Обирай наступну вправу:', Markup.inlineKeyboard(exButtons));
+        // Рахуємо математику
+        const totalVolume = sets.reduce((sum, set) => sum + (set.weight * set.reps), 0);
+        const avgWeight = (sets.reduce((sum, set) => sum + set.weight, 0) / sets.length).toFixed(1);
+
+        return ctx.reply(
+            `✅ Підхід ${sets.length} записано!\n📈 **Поточна статистика:**\nСередня вага: ${avgWeight} кг\nЗагальний тоннаж: ${totalVolume} кг\n\nКидай наступний підхід або завершуй:`,
+            Markup.inlineKeyboard([[Markup.button.callback('🏁 Завершити вправу', `finish_exercise`)]])
+        );
     }
 
     // ЛОГІКА ШІ
