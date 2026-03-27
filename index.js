@@ -23,6 +23,7 @@ const mainMenu = Markup.inlineKeyboard([
 ]);
 
 const profileMenu = Markup.inlineKeyboard([
+    [Markup.button.callback('📈 Історія та Графіки вправ', 'view_progress')],
     [Markup.button.callback('⚖️ Змінити вагу', 'edit_weight'), Markup.button.callback('📅 Змінити вік', 'edit_age')],
     [Markup.button.callback('🔙 Назад у меню', 'back_to_main')]
 ]);
@@ -71,15 +72,161 @@ bot.action('mode_nutrition', (ctx) => {
 
 bot.action('my_profile', async (ctx) => {
     ctx.answerCbQuery();
-    const { data: user } = await supabase.from('users').select('*').eq('telegram_id', ctx.from.id).maybeSingle();
-    if (user) {
-        ctx.reply(`⚙️ **Твій профіль:**\n👤 Ім'я: ${user.name}\n📅 Вік: ${user.age}\n⚖️ Вага: ${user.weight} кг`, profileMenu);
+    const telegramId = ctx.from.id;
+
+    const { data: user } = await supabase.from('users').select('*').eq('telegram_id', telegramId).maybeSingle();
+    if (!user) return ctx.reply('Не зміг знайти твої дані. Спробуй /start');
+
+    const { data: logs } = await supabase
+        .from('exercise_logs')
+        .select('sets_data, workout_exercises(name)')
+        .eq('telegram_id', telegramId);
+
+    let maxBench = 0, maxSquat = 0, maxDeadlift = 0;
+
+    if (logs) {
+        logs.forEach(log => {
+            if (!log.sets_data || log.sets_data.length === 0 || !log.workout_exercises?.name) return;
+            const exName = log.workout_exercises.name.toLowerCase();
+            const maxWeight = Math.max(...log.sets_data.map(s => s.weight));
+
+            if (exName.includes('жим лежачи')) { if (maxWeight > maxBench) maxBench = maxWeight; }
+            if (exName.includes('прис')) { if (maxWeight > maxSquat) maxSquat = maxWeight; }
+            if (exName.includes('станов') || exName.includes('мертв') || exName.includes('румун')) { if (maxWeight > maxDeadlift) maxDeadlift = maxWeight; }
+        });
     }
+
+    const benchStr = maxBench > 0 ? `${maxBench} кг` : '-';
+    const squatStr = maxSquat > 0 ? `${maxSquat} кг` : '-';
+    const deadliftStr = maxDeadlift > 0 ? `${maxDeadlift} кг` : '-';
+
+    const profileText = `⚙️ **Твій профіль:**\n👤 Ім'я: ${user.name}\n📅 Вік: ${user.age} років\n⚖️ Вага: ${user.weight} кг\n\n🏆 **Твої рекорди (Максимальна вага):**\n🔸 Жим лежачи: ${benchStr}\n🔸 Присідання: ${squatStr}\n🔸 Станова тяга: ${deadliftStr}`;
+
+    ctx.reply(profileText, profileMenu);
 });
 
 bot.action('edit_weight', (ctx) => { ctx.answerCbQuery(); ctx.session.step = 'editing_weight'; ctx.reply('Введи нову вагу (кг):'); });
 bot.action('edit_age', (ctx) => { ctx.answerCbQuery(); ctx.session.step = 'editing_age'; ctx.reply('Введи новий вік:'); });
 bot.action('back_to_main', (ctx) => { ctx.answerCbQuery(); ctx.session.step = 'registered'; ctx.reply('Меню:', mainMenu); });
+
+// === ЛОГІКА: ГРАФІКИ ТА ІСТОРІЯ ===
+bot.action('view_progress', async (ctx) => {
+    ctx.answerCbQuery();
+    const telegramId = ctx.from.id;
+
+    const { data: logs } = await supabase
+        .from('exercise_logs')
+        .select('exercise_id, workout_exercises(name)')
+        .eq('telegram_id', telegramId);
+
+    if (!logs || logs.length === 0) {
+        return ctx.reply('Ти ще не записав жодного тренування в базу. Немає що аналізувати! 😉', Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад', 'my_profile')]]));
+    }
+
+    const uniqueExercises = [];
+    const seenIds = new Set();
+    
+    logs.forEach(log => {
+        if (!seenIds.has(log.exercise_id) && log.workout_exercises?.name) {
+            seenIds.add(log.exercise_id);
+            uniqueExercises.push({ id: log.exercise_id, name: log.workout_exercises.name });
+        }
+    });
+
+    const exButtons = uniqueExercises.map(ex => [Markup.button.callback(`📈 ${ex.name}`, `prog_ex_${ex.id}`)]);
+    exButtons.push([Markup.button.callback('🔙 Назад до профілю', 'my_profile')]);
+
+    ctx.reply('Обери вправу, щоб подивитися свій графік прогресу:', Markup.inlineKeyboard(exButtons));
+});
+
+bot.action(/prog_ex_(.+)/, async (ctx) => {
+    ctx.answerCbQuery();
+    const exerciseId = ctx.match[1];
+    const telegramId = ctx.from.id;
+
+    const { data: logs } = await supabase
+        .from('exercise_logs')
+        .select('created_at, sets_data, workout_exercises(name)')
+        .eq('telegram_id', telegramId)
+        .eq('exercise_id', exerciseId)
+        .order('created_at', { ascending: true });
+
+    if (!logs || logs.length === 0) return ctx.reply('Даних немає.');
+
+    const exName = logs[0].workout_exercises.name;
+    const validLogs = logs.filter(l => l.sets_data && l.sets_data.length > 0);
+
+    if (validLogs.length === 0) return ctx.reply('Немає записаних підходів для цієї вправи.');
+
+    const labels = [];
+    const maxWeights = [];
+    const avgWeights = []; // Масив для середньої ваги
+
+    let historyText = `📈 **Твоя статистика: ${exName}**\n\n`;
+
+    validLogs.forEach(log => {
+        const dateObj = new Date(log.created_at);
+        const dateStr = dateObj.toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit' });
+        
+        // Шукаємо максимальну і рахуємо середню вагу
+        const maxW = Math.max(...log.sets_data.map(s => s.weight));
+        const sumW = log.sets_data.reduce((acc, s) => acc + s.weight, 0);
+        const avgW = +(sumW / log.sets_data.length).toFixed(1);
+
+        labels.push(dateStr);
+        maxWeights.push(maxW);
+        avgWeights.push(avgW); // Додаємо середнє значення на графік
+
+        const setsDetails = log.sets_data.map(s => `${s.weight}x${s.reps}`).join(', ');
+        historyText += `📅 **${dateStr}**: ${setsDetails}\n`;
+    });
+
+    // Генеруємо графік з двома лініями
+    const chartConfig = {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Макс. вага (кг)',
+                    data: maxWeights,
+                    borderColor: 'rgb(54, 162, 235)', // Синій
+                    backgroundColor: 'rgba(54, 162, 235, 0.1)',
+                    borderWidth: 3,
+                    tension: 0.3,
+                    fill: true
+                },
+                {
+                    label: 'Сер. вага (кг)',
+                    data: avgWeights,
+                    borderColor: 'rgb(255, 99, 132)', // Червоний
+                    backgroundColor: 'rgba(255, 99, 132, 0.1)',
+                    borderWidth: 3,
+                    tension: 0.3,
+                    fill: true
+                }
+            ]
+        },
+        options: {
+            title: { display: true, text: `Прогрес: ${exName}` }
+        }
+    };
+
+    const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&w=600&h=350`;
+
+    try {
+        await ctx.replyWithPhoto(chartUrl, {
+            caption: historyText.length > 900 ? historyText.substring(0, 900) + '...\n*(Історія скорочена)*' : historyText,
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: [[Markup.button.callback('🔙 Назад до списку', 'view_progress')]]
+            }
+        });
+    } catch (e) {
+        console.error('Помилка графіка:', e);
+        ctx.reply(historyText, Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад до списку', 'view_progress')]]));
+    }
+});
 
 // === ЛОГІКА ТРЕНУВАНЬ ===
 bot.action('start_workout', async (ctx) => {
@@ -160,7 +307,6 @@ bot.action(/run_split_(.+)/, async (ctx) => {
     if (!exercises || exercises.length === 0) return ctx.reply('У цьому тренуванні немає вправ! Додай їх спочатку.');
 
     const exButtons = exercises.map(ex => [Markup.button.callback(`📝 ${ex.name}`, `log_ex_${ex.id}`)]);
-    // НОВА КНОПКА ЗАВЕРШЕННЯ З ШІ
     exButtons.push([Markup.button.callback('🏁 Завершити тренування (ШІ Аналіз)', 'finish_workout')]);
 
     ctx.reply('Тренування розпочато! Обирай вправу, яку зараз робиш:', Markup.inlineKeyboard(exButtons));
@@ -193,17 +339,14 @@ bot.action(/log_ex_(.+)/, async (ctx) => {
 
     let text = `💪 **Вправа: ${exercise.name}**\n\n`;
     
-    // === НОВИЙ БЛОК: ДЕТАЛЬНИЙ ВИВІД ІСТОРІЇ ===
     if (history && history.sets_data && history.sets_data.length > 0) {
         text += `📊 **Минулого разу:**\n`;
         const hSets = history.sets_data;
         
-        // Виводимо кожен підхід окремо
         hSets.forEach((set, index) => {
             text += `  • ${index + 1} підхід: ${set.reps} повт, ${set.weight} кг\n`;
         });
         
-        // Коментар і середня вага
         if (history.note) text += `💡 *Коментар:* ${history.note}\n`;
         const hAvg = (hSets.reduce((sum, set) => sum + set.weight, 0) / hSets.length).toFixed(1);
         text += `📈 Сер. вага: ${hAvg} кг\n\n`;
@@ -221,23 +364,19 @@ bot.action('finish_exercise', async (ctx) => {
     
     const { data: exercises } = await supabase.from('workout_exercises').select('*').eq('split_id', ctx.session.activeSplitId);
     const exButtons = exercises.map(ex => [Markup.button.callback(`📝 ${ex.name}`, `log_ex_${ex.id}`)]);
-    // НОВА КНОПКА ЗАВЕРШЕННЯ З ШІ
     exButtons.push([Markup.button.callback('🏁 Завершити тренування (ШІ Аналіз)', 'finish_workout')]);
 
     ctx.reply('✅ Вправу успішно збережено! Обирай наступну:', Markup.inlineKeyboard(exButtons));
 });
 
-// === НОВИЙ БЛОК: ШІ АНАЛІЗ ТРЕНУВАННЯ ===
 bot.action('finish_workout', async (ctx) => {
     ctx.answerCbQuery();
     ctx.session.step = 'registered';
     const telegramId = ctx.from.id;
 
-    // Редагуємо повідомлення, щоб юзер бачив, що ШІ думає
     ctx.editMessageText('🧠 Аналізую твої підходи та генерую звіт... ⏳');
 
     try {
-        // Дістаємо логі вправ за останні 6 годин
         const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
         const { data: logs, error } = await supabase
             .from('exercise_logs')
@@ -249,7 +388,6 @@ bot.action('finish_workout', async (ctx) => {
             return ctx.reply('Ти завершив тренування, але я не знайшов записаних підходів. Наступного разу фіксуй вагу! 😉\n\n/menu');
         }
 
-        // Формуємо текст-звіт для ШІ
         let workoutDataStr = '';
         logs.forEach(log => {
             if (log.sets_data && log.sets_data.length > 0) {
@@ -288,7 +426,6 @@ ${workoutDataStr}
         ctx.reply('Тренування завершено! Вибач, ШІ-тренер трохи завис і не зміг видати аналіз, але ти молодець! 💪 /menu');
     }
 });
-
 
 // === ОБРОБНИК ТЕКСТУ ===
 bot.on('text', async (ctx) => {
@@ -370,11 +507,32 @@ bot.on('text', async (ctx) => {
             ctx.sendChatAction('typing'); 
             const { data: user } = await supabase.from('users').select('*').eq('telegram_id', telegramId).maybeSingle();
             
-            let roleDescription = ctx.session.step === 'chatting_coach' 
-                ? 'Ти досвідчений фітнес-тренер.' 
-                : 'Ти професійний нутриціолог. Твоя ціль - аналізувати їжу та рахувати калорії.';
+            const { data: recentLogs } = await supabase
+                .from('exercise_logs')
+                .select('sets_data, workout_exercises(name)')
+                .eq('telegram_id', telegramId)
+                .order('created_at', { ascending: false })
+                .limit(15); 
 
-            const systemPrompt = `${roleDescription} Твій клієнт: ${user?.name || 'Спортсмен'}, вік ${user?.age}, вага ${user?.weight} кг. Відповідай українською коротко.`;
+            let historyText = '';
+            if (recentLogs && recentLogs.length > 0) {
+                historyText = '\nОстанні результати тренувань клієнта (для аналізу навантажень):\n';
+                recentLogs.forEach(log => {
+                    if (log.sets_data && log.sets_data.length > 0) {
+                        const exName = log.workout_exercises?.name || 'Вправа';
+                        const maxWeight = Math.max(...log.sets_data.map(s => s.weight));
+                        historyText += `- ${exName}: робив з макс. вагою ${maxWeight} кг (${log.sets_data.length} підх.)\n`;
+                    }
+                });
+            } else {
+                historyText = '\nКлієнт ще не записував свої тренування в базу.\n';
+            }
+
+            let roleDescription = ctx.session.step === 'chatting_coach' 
+                ? 'Ти професійний фітнес-тренер. Аналізуй показники клієнта, якщо він питає про свої результати.' 
+                : 'Ти професійний нутриціолог. Враховуй тренування клієнта для розрахунку харчування.';
+
+            const systemPrompt = `${roleDescription} Твій клієнт: ${user?.name || 'Спортсмен'}, вік ${user?.age}, вага ${user?.weight} кг. ${historyText} Відповідай українською коротко, як жива людина.`;
 
             const apiMessages = [
                 { role: 'system', content: systemPrompt },
@@ -391,7 +549,7 @@ bot.on('text', async (ctx) => {
 
             ctx.session.chatHistory.push({ role: 'user', content: text });
             ctx.session.chatHistory.push({ role: 'assistant', content: response });
-            if (ctx.session.chatHistory.length > 8) ctx.session.chatHistory = ctx.session.chatHistory.slice(-8);
+            if (ctx.session.chatHistory.length > 10) ctx.session.chatHistory = ctx.session.chatHistory.slice(-10);
 
             return ctx.reply(response + '\n\n(Меню: /menu)');
         } catch (error) {
