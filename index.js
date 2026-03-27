@@ -112,6 +112,17 @@ bot.action('back_to_main', (ctx) => {
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
     const telegramId = ctx.from.id;
+    ctx.session = ctx.session || {};
+
+    // --- НОВИЙ БЛОК: ЛОГУВАННЯ ПОВІДОМЛЕННЯ ---
+    try {
+        await supabase.from('messages').insert([
+            { telegram_id: telegramId, message_text: text }
+        ]);
+    } catch (error) {
+        console.error('Помилка логування повідомлення:', error);
+    }
+    // ------------------------------------------
 
     if (ctx.session.step === 'waiting_for_weight') {
         const weight = parseFloat(text);
