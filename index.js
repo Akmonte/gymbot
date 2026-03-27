@@ -210,20 +210,23 @@ bot.action(/prog_ex_(.+)/, async (ctx) => {
 
     const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&w=600&h=350`;
 
-    const chartMenu = Markup.inlineKeyboard([
-        [Markup.button.callback('🗑 Видалити останній запис', `del_log_${exerciseId}`)],
-        [Markup.button.callback('🔙 Назад до списку', 'view_progress')]
-    ]);
-
     try {
         await ctx.replyWithPhoto(chartUrl, {
             caption: historyText.length > 900 ? historyText.substring(0, 900) + '...\n*(Історія скорочена)*' : historyText,
             parse_mode: 'Markdown',
-            reply_markup: chartMenu
+            reply_markup: {
+                inline_keyboard: [
+                    [Markup.button.callback('🗑 Видалити останній запис', `del_log_${exerciseId}`)],
+                    [Markup.button.callback('🔙 Назад до списку', 'view_progress')]
+                ]
+            }
         });
     } catch (e) {
         console.error('Помилка графіка:', e);
-        ctx.reply(historyText, chartMenu);
+        ctx.reply(historyText, Markup.inlineKeyboard([
+            [Markup.button.callback('🗑 Видалити останній запис', `del_log_${exerciseId}`)],
+            [Markup.button.callback('🔙 Назад до списку', 'view_progress')]
+        ]));
     }
 });
 
