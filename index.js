@@ -181,20 +181,35 @@ bot.on('text', async (ctx) => {
     ctx.reply('Я тебе не зовсім зрозумів. Використовуй меню: /menu');
 });
 
-bot.launch();
-console.log('✅ Бот з інтегрованим ШІ Llama 3 (Groq) запущений!');
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
-// === ДЛЯ ХОСТИНГУ ===
+// === ДЛЯ ХОСТИНГУ ТА WEBHOOK ===
 const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Створюємо секретний шлях для вебхуку (щоб тільки Telegram знав, куди слати дані)
+const secretPath = `/telegraf/${bot.secretPathComponent()}`;
 
 app.get('/', (req, res) => {
     res.send('Бот-нутриціолог працює онлайн! 🍏');
 });
 
+// Перевіряємо, чи є домен для Webhook (URL з Render)
+const webhookDomain = process.env.WEBHOOK_DOMAIN;
+
+if (webhookDomain) {
+    // ПРОДАКШЕН (Render): вмикаємо Webhook
+    bot.telegram.setWebhook(`${webhookDomain}${secretPath}`);
+    app.use(bot.webhookCallback(secretPath));
+    console.log(`✅ Webhook налаштовано на домені: ${webhookDomain}`);
+} else {
+    // ЛОКАЛЬНО (VS Code): вмикаємо старий добрий Polling
+    bot.launch();
+    console.log('✅ Бот запущений у режимі Polling (локально)!');
+}
+
 app.listen(PORT, () => {
     console.log(`Веб-сервер запущено на порту ${PORT}`);
 });
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
