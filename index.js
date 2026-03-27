@@ -160,7 +160,7 @@ bot.action(/prog_ex_(.+)/, async (ctx) => {
 
     const labels = [];
     const maxWeights = [];
-    const avgWeights = []; // Масив для середньої ваги
+    const avgWeights = [];
 
     let historyText = `📈 **Твоя статистика: ${exName}**\n\n`;
 
@@ -168,20 +168,18 @@ bot.action(/prog_ex_(.+)/, async (ctx) => {
         const dateObj = new Date(log.created_at);
         const dateStr = dateObj.toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit' });
         
-        // Шукаємо максимальну і рахуємо середню вагу
         const maxW = Math.max(...log.sets_data.map(s => s.weight));
         const sumW = log.sets_data.reduce((acc, s) => acc + s.weight, 0);
         const avgW = +(sumW / log.sets_data.length).toFixed(1);
 
         labels.push(dateStr);
         maxWeights.push(maxW);
-        avgWeights.push(avgW); // Додаємо середнє значення на графік
+        avgWeights.push(avgW);
 
         const setsDetails = log.sets_data.map(s => `${s.weight}x${s.reps}`).join(', ');
         historyText += `📅 **${dateStr}**: ${setsDetails}\n`;
     });
 
-    // Генеруємо графік з двома лініями
     const chartConfig = {
         type: 'line',
         data: {
@@ -190,7 +188,7 @@ bot.action(/prog_ex_(.+)/, async (ctx) => {
                 {
                     label: 'Макс. вага (кг)',
                     data: maxWeights,
-                    borderColor: 'rgb(54, 162, 235)', // Синій
+                    borderColor: 'rgb(54, 162, 235)',
                     backgroundColor: 'rgba(54, 162, 235, 0.1)',
                     borderWidth: 3,
                     tension: 0.3,
@@ -199,7 +197,7 @@ bot.action(/prog_ex_(.+)/, async (ctx) => {
                 {
                     label: 'Сер. вага (кг)',
                     data: avgWeights,
-                    borderColor: 'rgb(255, 99, 132)', // Червоний
+                    borderColor: 'rgb(255, 99, 132)',
                     backgroundColor: 'rgba(255, 99, 132, 0.1)',
                     borderWidth: 3,
                     tension: 0.3,
@@ -207,24 +205,57 @@ bot.action(/prog_ex_(.+)/, async (ctx) => {
                 }
             ]
         },
-        options: {
-            title: { display: true, text: `Прогрес: ${exName}` }
-        }
+        options: { title: { display: true, text: `Прогрес: ${exName}` } }
     };
 
     const chartUrl = `https://quickchart.io/chart?c=${encodeURIComponent(JSON.stringify(chartConfig))}&w=600&h=350`;
+
+    const chartMenu = Markup.inlineKeyboard([
+        [Markup.button.callback('🗑 Видалити останній запис', `del_log_${exerciseId}`)],
+        [Markup.button.callback('🔙 Назад до списку', 'view_progress')]
+    ]);
 
     try {
         await ctx.replyWithPhoto(chartUrl, {
             caption: historyText.length > 900 ? historyText.substring(0, 900) + '...\n*(Історія скорочена)*' : historyText,
             parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [[Markup.button.callback('🔙 Назад до списку', 'view_progress')]]
-            }
+            reply_markup: chartMenu
         });
     } catch (e) {
         console.error('Помилка графіка:', e);
-        ctx.reply(historyText, Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад до списку', 'view_progress')]]));
+        ctx.reply(historyText, chartMenu);
+    }
+});
+
+// === НОВА ЛОГІКА: ВИДАЛЕННЯ ЗАПИСУ ===
+bot.action(/del_log_(.+)/, async (ctx) => {
+    ctx.answerCbQuery();
+    const exerciseId = ctx.match[1];
+    const telegramId = ctx.from.id;
+
+    // Шукаємо найновіший запис для цієї вправи
+    const { data: latestLog } = await supabase
+        .from('exercise_logs')
+        .select('id')
+        .eq('telegram_id', telegramId)
+        .eq('exercise_id', exerciseId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (latestLog) {
+        // Видаляємо його
+        await supabase.from('exercise_logs').delete().eq('id', latestLog.id);
+        
+        // Видаляємо старе повідомлення з графіком (щоб чат не "стрибав")
+        try { await ctx.deleteMessage(); } catch(e) {}
+        
+        ctx.reply('✅ Останній запис успішно видалено з бази!', Markup.inlineKeyboard([
+            [Markup.button.callback('🔄 Оновити графік', `prog_ex_${exerciseId}`)],
+            [Markup.button.callback('🔙 Назад до списку', 'view_progress')]
+        ]));
+    } else {
+        ctx.reply('Немає записів для видалення.', Markup.inlineKeyboard([[Markup.button.callback('🔙 Назад до списку', 'view_progress')]]));
     }
 });
 
