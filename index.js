@@ -186,3 +186,15 @@ console.log('✅ Бот з інтегрованим ШІ Llama 3 (Groq) запу
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// === ДЛЯ ХОСТИНГУ ===
+const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+    res.send('Бот-нутриціолог працює онлайн! 🍏');
+});
+
+app.listen(PORT, () => {
+    console.log(`Веб-сервер запущено на порту ${PORT}`);
+});
