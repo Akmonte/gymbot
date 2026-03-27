@@ -7,7 +7,6 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// === MIDDLEWARE (Пам'ять бота) ===
 bot.use(session());
 bot.use((ctx, next) => {
     ctx.session = ctx.session || {};
@@ -28,7 +27,6 @@ const profileMenu = Markup.inlineKeyboard([
     [Markup.button.callback('🔙 Назад у меню', 'back_to_main')]
 ]);
 
-// === СТАРТ ТА РЕЄСТРАЦІЯ ===
 bot.start(async (ctx) => {
     const telegramId = ctx.from.id;
     const firstName = ctx.from.first_name || 'Спортсмен';
@@ -55,11 +53,10 @@ bot.start(async (ctx) => {
 
 bot.command('menu', (ctx) => {
     ctx.session.step = 'registered';
-    ctx.session.chatHistory = []; // Очищаємо пам'ять ШІ
+    ctx.session.chatHistory = [];
     ctx.reply('Головне меню:', mainMenu);
 });
 
-// === ОБРОБНИКИ КНОПОК ПРОФІЛЮ ТА ШІ ===
 bot.action('mode_coach', (ctx) => {
     ctx.answerCbQuery();
     ctx.session.step = 'chatting_coach';
@@ -84,17 +81,14 @@ bot.action('edit_weight', (ctx) => { ctx.answerCbQuery(); ctx.session.step = 'ed
 bot.action('edit_age', (ctx) => { ctx.answerCbQuery(); ctx.session.step = 'editing_age'; ctx.reply('Введи новий вік:'); });
 bot.action('back_to_main', (ctx) => { ctx.answerCbQuery(); ctx.session.step = 'registered'; ctx.reply('Меню:', mainMenu); });
 
-// === НОВА ЛОГІКА: ТРЕНУВАННЯ ТА СПЛІТИ ===
+// === ЛОГІКА ТРЕНУВАНЬ ===
 
 bot.action('start_workout', async (ctx) => {
     ctx.answerCbQuery();
     const telegramId = ctx.from.id;
-
-    // Шукаємо спліти користувача
     const { data: splits } = await supabase.from('workout_splits').select('*').eq('telegram_id', telegramId);
 
     if (!splits || splits.length === 0) {
-        // Якщо сплітів немає, пропонуємо створити
         const noSplitsMenu = Markup.inlineKeyboard([
             [Markup.button.callback('➕ Створити свій спліт', 'create_custom_split')],
             [Markup.button.callback('📚 Стандартний (Push/Pull/Legs)', 'create_standard_split')],
@@ -102,38 +96,30 @@ bot.action('start_workout', async (ctx) => {
         ]);
         return ctx.reply('У тебе ще немає програм тренувань. Що оберемо?', noSplitsMenu);
     } else {
-        // Якщо є, виводимо їх кнопками
         const splitButtons = splits.map(split => [Markup.button.callback(`💪 ${split.name}`, `view_split_${split.id}`)]);
         splitButtons.push([Markup.button.callback('➕ Додати новий спліт', 'create_custom_split')]);
         splitButtons.push([Markup.button.callback('🔙 Назад у меню', 'back_to_main')]);
-        
-        return ctx.reply('Обери своє тренування на сьогодні:', Markup.inlineKeyboard(splitButtons));
+        return ctx.reply('Обери своє тренування:', Markup.inlineKeyboard(splitButtons));
     }
 });
 
-// Створення стандартного спліту
 bot.action('create_standard_split', async (ctx) => {
     ctx.answerCbQuery();
     const telegramId = ctx.from.id;
-    
-    // Додаємо 3 базові дні
     await supabase.from('workout_splits').insert([
         { telegram_id: telegramId, name: 'День 1: Push (Груди/Трицепс/Плечі)' },
         { telegram_id: telegramId, name: 'День 2: Pull (Спина/Біцепс)' },
         { telegram_id: telegramId, name: 'День 3: Legs (Ноги/Прес)' }
     ]);
-    
-    ctx.reply('✅ Стандартний спліт успішно додано! Натисни /menu та зайди в Тренування.');
+    ctx.reply('✅ Стандартний спліт додано! Натисни /menu та зайди в Тренування.');
 });
 
-// Запит на створення кастомного спліту
 bot.action('create_custom_split', (ctx) => {
     ctx.answerCbQuery();
     ctx.session.step = 'waiting_for_split_name';
     ctx.reply('Введи назву для свого нового дня тренувань (наприклад: "Вівторок - Тільки руки"):');
 });
 
-// Перегляд конкретного спліту (Regex для відлову динамічного ID)
 bot.action(/view_split_(.+)/, async (ctx) => {
     ctx.answerCbQuery();
     const splitId = ctx.match[1];
@@ -152,6 +138,7 @@ bot.action(/view_split_(.+)/, async (ctx) => {
     }
 
     const splitMenu = Markup.inlineKeyboard([
+        [Markup.button.callback('▶️ ПОЧАТИ ТРЕНУВАННЯ', `run_split_${splitId}`)],
         [Markup.button.callback('➕ Додати вправу', `add_ex_${splitId}`)],
         [Markup.button.callback('🔙 Назад до списку', 'start_workout')]
     ]);
@@ -159,24 +146,70 @@ bot.action(/view_split_(.+)/, async (ctx) => {
     ctx.reply(text, splitMenu);
 });
 
-// Кнопка додавання вправи
 bot.action(/add_ex_(.+)/, (ctx) => {
     ctx.answerCbQuery();
-    ctx.session.activeSplitId = ctx.match[1]; // Зберігаємо ID спліту, куди додаємо
+    ctx.session.activeSplitId = ctx.match[1];
     ctx.session.step = 'waiting_for_exercise';
     ctx.reply('Напиши вправу у форматі: **Назва, Підходи, Повторення**\n\n*(Наприклад: Жим лежачи, 4, 10)*', { parse_mode: 'Markdown' });
 });
 
+// === НОВЕ: ПРОЦЕС ТРЕНУВАННЯ ===
 
-// === ОБРОБНИК ТЕКСТУ (Центр управління) ===
+bot.action(/run_split_(.+)/, async (ctx) => {
+    ctx.answerCbQuery();
+    const splitId = ctx.match[1];
+    ctx.session.activeSplitId = splitId;
+    
+    const { data: exercises } = await supabase.from('workout_exercises').select('*').eq('split_id', splitId);
+    
+    if (!exercises || exercises.length === 0) {
+        return ctx.reply('У цьому тренуванні немає вправ! Додай їх спочатку.');
+    }
+
+    const exButtons = exercises.map(ex => [Markup.button.callback(`📝 ${ex.name}`, `log_ex_${ex.id}`)]);
+    exButtons.push([Markup.button.callback('🏁 Завершити тренування', 'start_workout')]);
+
+    ctx.reply('Тренування розпочато! Обирай вправу, яку зараз робиш:', Markup.inlineKeyboard(exButtons));
+});
+
+bot.action(/log_ex_(.+)/, async (ctx) => {
+    ctx.answerCbQuery();
+    const exerciseId = ctx.match[1];
+    ctx.session.activeExerciseId = exerciseId;
+    ctx.session.step = 'logging_exercise';
+
+    // Дістаємо назву вправи
+    const { data: exercise } = await supabase.from('workout_exercises').select('*').eq('id', exerciseId).single();
+    
+    // Шукаємо МИНУЛИЙ запис цієї вправи
+    const { data: history } = await supabase.from('exercise_logs')
+        .select('*')
+        .eq('exercise_id', exerciseId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    let text = `Вправа: **${exercise.name}**\n\n`;
+    if (history) {
+        text += `📊 **Минулого разу:**\nВага: ${history.weight} кг | Підходів: ${history.sets_done} | Повторень: ${history.reps_done}\n`;
+        if (history.note) text += `💡 *Твій коментар:* ${history.note}\n\n`;
+    } else {
+        text += `Це твоє перше виконання цієї вправи.\n\n`;
+    }
+
+    text += `👉 Напиши свій сьогоднішній результат у форматі:\n**Вага, Підходи, Повторення, Коментар**\n\n*(Наприклад: 80, 4, 10, Наступного разу взяти 82.5)*`;
+
+    ctx.reply(text, { parse_mode: 'Markdown' });
+});
+
+
+// === ОБРОБНИК ТЕКСТУ ===
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
     const telegramId = ctx.from.id;
 
-    // Логування всіх повідомлень
     try { await supabase.from('messages').insert([{ telegram_id: telegramId, message_text: text }]); } catch (e) {}
 
-    // 1. РЕЄСТРАЦІЯ ТА ПРОФІЛЬ
     if (ctx.session.step === 'waiting_for_weight' || ctx.session.step === 'editing_weight') {
         const weight = parseFloat(text);
         if (isNaN(weight)) return ctx.reply('Введи число.');
@@ -197,7 +230,6 @@ bot.on('text', async (ctx) => {
         return ctx.reply('✅ Вік збережено!', mainMenu);
     }
 
-    // 2. СТВОРЕННЯ СПЛІТІВ ТА ВПРАВ
     if (ctx.session.step === 'waiting_for_split_name') {
         await supabase.from('workout_splits').insert([{ telegram_id: telegramId, name: text }]);
         ctx.session.step = 'registered';
@@ -205,9 +237,8 @@ bot.on('text', async (ctx) => {
     }
 
     if (ctx.session.step === 'waiting_for_exercise') {
-        // Простий парсинг тексту користувача
         const parts = text.split(',');
-        if (parts.length < 3) return ctx.reply('Будь ласка, використовуй формат: Назва, Підходи, Повторення (через кому).');
+        if (parts.length < 3) return ctx.reply('Формат: Назва, Підходи, Повторення (через кому).');
         
         const exName = parts[0].trim();
         const exSets = parseInt(parts[1].trim()) || 3;
@@ -220,11 +251,41 @@ bot.on('text', async (ctx) => {
             reps_target: exReps 
         }]);
 
-        ctx.session.step = 'registered';
-        return ctx.reply(`✅ Вправу "${exName}" додано! Тисни /menu`);
+        // Безперервне додавання вправ (не міняємо session.step)
+        return ctx.reply(`✅ Вправу "${exName}" додано! Пиши наступну, або тисни /menu, щоб вийти.`);
     }
 
-    // 3. ЛОГІКА ШІ (З ПАМ'ЯТТЮ)
+    // === НОВЕ: ЛОГУВАННЯ РЕЗУЛЬТАТІВ ТРЕНУВАННЯ ===
+    if (ctx.session.step === 'logging_exercise') {
+        const parts = text.split(',');
+        if (parts.length < 3) return ctx.reply('Формат: Вага, Підходи, Повторення, [Коментар]. Спробуй ще раз.');
+
+        const weight = parseFloat(parts[0].trim());
+        const sets = parseInt(parts[1].trim());
+        const reps = parts[2].trim();
+        // Якщо є коментар (4-та частина), з'єднуємо все, що після 3-ї коми (якщо всередині коментаря були коми)
+        const note = parts.length > 3 ? parts.slice(3).join(',').trim() : null;
+
+        await supabase.from('exercise_logs').insert([{
+            telegram_id: telegramId,
+            exercise_id: ctx.session.activeExerciseId,
+            weight: weight,
+            sets_done: sets,
+            reps_done: reps,
+            note: note
+        }]);
+
+        ctx.session.step = 'registered';
+        
+        // Повертаємо меню поточного тренування
+        const { data: exercises } = await supabase.from('workout_exercises').select('*').eq('split_id', ctx.session.activeSplitId);
+        const exButtons = exercises.map(ex => [Markup.button.callback(`📝 ${ex.name}`, `log_ex_${ex.id}`)]);
+        exButtons.push([Markup.button.callback('🏁 Завершити тренування', 'start_workout')]);
+
+        return ctx.reply('✅ Результат записано! Обирай наступну вправу:', Markup.inlineKeyboard(exButtons));
+    }
+
+    // ЛОГІКА ШІ
     if (ctx.session.step === 'chatting_coach' || ctx.session.step === 'chatting_nutritionist') {
         try {
             ctx.sendChatAction('typing'); 
@@ -263,7 +324,6 @@ bot.on('text', async (ctx) => {
     ctx.reply('Я тебе не зовсім зрозумів. Використовуй меню: /menu');
 });
 
-// === ДЛЯ ХОСТИНГУ ТА WEBHOOK ===
 const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
